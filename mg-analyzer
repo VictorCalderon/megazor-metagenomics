@@ -1,0 +1,251 @@
+#!/usr/bin/env bash
+
+# Set environment variables
+# export DEBUG_MG_ANALYZER=0
+#
+#
+# This script runs the following pipeline on your data:
+#   1. Assess raw data quality by running FastQC on it
+#   2. Trim the raw data using Trimmomatic
+#   3. Assess trimmed data quality by running FastQC on it
+#   4. Assemble the trimmed data using MegaHit
+#   5. Assess the assembly quality using QUAST
+#   6. Annotate the assembly using Kraken
+#   7. Filter rRNA reads from the raw data using Barrnap
+#
+# The script will create a directory for each step of the pipeline and
+# store the output of each step in its own directory.
+
+if [[ $DEBUG_MG_ANALYZER ]]; then
+    # Print statements as they are being executed
+    set -x
+fi
+
+# Stop pipeline if it fails at some point
+set -eo pipefail
+
+# Functions to call
+get_help() {
+    echo "MG-Analyzer on Megazord INTEC."
+    echo "Run your metagenomics analysis pipeline."
+    echo " "
+    echo "Usage: bash pipeline.sh [options]"
+    echo " "
+    echo "Available options:"
+    echo " "
+    echo "-h, --help            show brief help"
+    echo "Required:"
+    echo "-i, --input=DIR       set an input directory with paired-end fastq | fq files."
+    echo "-o, --output=DIR      set an output directory."
+    echo " "
+    echo "Optional:"
+    echo "-t, --threads=INT     set the number of threads to use."
+    echo "-m, --memory=INT      set the amount of memory to use."
+    echo "-k, --kraken=DIR      set the directory with the Kraken database."
+    echo "-q, --quast=DIR       set the directory with the QUAST database."
+    echo "-w, --overwrite       set the ability to overwrite directories if they exist."
+
+    exit 0
+}
+
+### Main command line interface
+### ---------------------------
+
+# Check if there are arguments
+if [ $# -eq 0 ]; then
+    get_help
+fi
+
+# Parse command line arguments
+while test $# -gt 0; do
+    case "$1" in
+    -h | --help)
+        get_help
+        ;;
+    -i | --input)
+        shift
+        if test $# -gt 0; then
+            export INPUT_DIR=$(echo $1 | sed 's:/*$::')
+        else
+            echo "No input directory specified"
+            exit 1
+        fi
+        shift
+        ;;
+    -o | --output)
+        shift
+        if test $# -gt 0; then
+            export OUTPUT_DIR=$(echo $1 | sed 's:/*$::')
+        else
+            echo "Output directory same as input directory"
+            export OUTPUT_DIR=$INPUT_DIR
+            export OUTPUT_SAME_AS_INPUT=1
+        fi
+        shift
+        ;;
+    -t | --threads)
+        shift
+        if test $# -gt 0; then
+            export MG_THREADS=$1
+        else
+            export MG_THREADS=8
+        fi
+        shift
+        ;;
+    -k | --kraken)
+        shift
+        if test $# -gt 0; then
+            export KRAKEN_DB=$1
+        else
+            export KRAKEN_DB=0
+        fi
+        shift
+        ;;
+    -w | --overwrite)
+        # Add option to overwrite output directory
+        export OVERWRITE=1
+        shift
+        ;;
+    --skip-qc)
+        # Add option to skip QC
+        export SKIP_QC=1
+        shift
+        ;;
+    --skip-trim)
+        # Add option to skip trimming
+        export SKIP_TRIM=1
+        shift
+        ;;
+    --skip-megahit)
+        # Add option to skip trimming
+        export SKIP_MEGAHIT=1
+        shift
+        ;;
+    *)
+        break
+        ;;
+    esac
+done
+
+# Check if input directory contains at least two files with extension fastq or fq
+if [[ $(ls -1 $INPUT_DIR | grep -E "fastq|fq" | wc -l) -lt 2 ]]; then
+    echo "[ERROR] Input directory must contain at least two files with extension fastq or fq."
+    exit 1
+fi
+
+# check if all programs we need are installed
+if ! [ -x "$(command -v bash)" ]; then
+    echo >&2 "Error: bash not installed."
+    exit 1
+fi
+
+# Check if fastqc is installed
+if ! [ -x "$(command -v fastqc)" ]; then
+    echo >&2 "Error: fastqc not installed."
+    exit 1
+fi
+
+# Build output directory if it does not exist
+if [[ ! -d $OUTPUT_DIR ]]; then
+    mkdir -p $OUTPUT_DIR
+    mkdir -p $OUTPUT_DIR/quality
+    mkdir -p $OUTPUT_DIR/trimmed
+    mkdir -p $OUTPUT_DIR/kraken
+fi
+
+# Build quality and trimming directory inside input if it does not exist
+if [[ OUTPUT_SAME_AS_INPUT -eq 1 ]]; then
+    mkdir -p $OUTPUT_DIR/quality
+    mkdir -p $OUTPUT_DIR/trimmed
+    mkdir -p $OUTPUT_DIR/kraken
+fi
+
+# Grab the format if these files are fq or fastq
+FQ_FORMAT=$(ls -1 $INPUT_DIR | grep -E "fastq|fq" | head -n 1 | rev | cut -d "." -f 1 | rev)
+FQ_FORMAT=${FQ_FORMAT##*,}
+
+# Echo the format of these files
+echo "[INFO] [$(date)] Files are in $FQ_FORMAT format"
+
+if [[ $SKIP_QC -eq 1 ]]; then
+    echo "[INFO] [$(date)] Skiping QC step"
+else
+    # Run FastQC on raw data
+    echo "[INFO] [$(date)] First phase of pipeline: Quality control"
+    fastqc -t $MG_THREADS -o $OUTPUT_DIR/quality $INPUT_DIR/*.$FQ_FORMAT
+    # A simple echo to see if the command ran
+    echo "[INFO] [$(date)] End of first phase of pipeline: Quality control"
+fi
+
+# Check if trimmomatic is installed
+if ! [ -x "$(command -v trimmomatic)" ]; then
+    echo >&2 "Error: trimmomatic not installed."
+    exit 1
+fi
+
+# Find fastq base name and trim _1 and _2 from it
+FQ_BASE=$(basename ${INPUT_DIR}/*_1.${FQ_FORMAT} | sed 's/_1.fq//' | sed 's/_1.fastq//')
+
+# Echo file base name
+echo "[INFO] [$(date)] Base name of files is $FQ_BASE"
+
+if [[ $SKIP_TRIM -eq 1 ]]; then
+    echo "[INFO] [$(date)] Skipping trimming step"
+else
+    # Run Trimmomatic on raw data
+    echo "[INFO] [$(date)] Second phase of pipeline: Raw Data Preprocessing"
+    trimmomatic PE -threads ${MG_THREADS} \
+        ${INPUT_DIR}/${FQ_BASE}_1.${FQ_FORMAT} ${INPUT_DIR}/${FQ_BASE}_2.${FQ_FORMAT} \
+        ${OUTPUT_DIR}/trimmed/${FQ_BASE}_1.p.${FQ_FORMAT} ${OUTPUT_DIR}/trimmed/${FQ_BASE}_1.u.${FQ_FORMAT} \
+        ${OUTPUT_DIR}/trimmed/${FQ_BASE}_2.p.${FQ_FORMAT} ${OUTPUT_DIR}/trimmed/${FQ_BASE}_2.u.${FQ_FORMAT} \
+        LEADING:3 TRAILING:3 SLIDINGWINDOW:4:15 MINLEN:36 AVGQUAL:20
+    echo "[INFO] [$(date)] End of second phase of pipeline: Raw Data Preprocessing"
+fi
+
+# Find fastq base name and trim _1 and _2 from it
+FQ_TRIMMED=$(basename ${OUTPUT_DIR}/trimmed/*_1.p.${FQ_FORMAT} | sed 's/_1.p.fq//' | sed 's/_1.p.fastq//')
+
+if [[ $SKIP_MEGAHIT -eq 1 ]]; then
+    echo "[INFO] [$(date)] Skipping assembly with megahit."
+else
+    echo "[INFO] [$(date)] Third phase of pipeline: Trimmed Data Assembly"
+    # Build a trimmed subdirectory if it doesn't exist
+    if [ -d $OUTPUT_DIR/assembly ]; then
+        if [[ $OVERWRITE -eq 1 ]]; then
+            rm -rf ${OUTPUT_DIR}/assembly
+            # Run megahit on trimmed files
+            megahit -1 ${OUTPUT_DIR}/trimmed/${FQ_TRIMMED}_1.p.${FQ_FORMAT} -2 ${OUTPUT_DIR}/trimmed/${FQ_TRIMMED}_2.p.${FQ_FORMAT} --presets meta-large -o $OUTPUT_DIR/assembly -t ${MG_THREADS}
+            echo "[INFO] [$(date)] End of third phase of pipeline: Trimmed Data Assembly"
+        else
+            echo "[ERROR] [$(date)] Assembly directory already exists. Use --overwrite to overwrite it."
+            exit 1
+        fi
+    fi
+fi
+
+# Check if kraken2 is installed
+if ! [ -x "$(command -v kraken2)" ]; then
+    echo >&2 "Error: kraken2 not installed."
+    exit 1
+fi
+
+if [[ $SKIP_KRAKEN -eq 1 ]]; then
+    echo "[INFO] [$(date)] Skipping kraken2 step"
+else
+    # Check if envrionment variable KRAKEN_DB is set
+    if [[ -z $KRAKEN_DB ]]; then
+        echo >&2 "[ERROR] [$(date)] KRAKEN_DB not set. You must point to a kraken database."
+        exit 1
+    fi
+    # Run kraken2 on assembly
+    echo "[INFO] [$(date)] Fourth phase of pipeline: Taxonomy Analysis with Kraken2"
+    kraken2 ${OUTPUT_DIR}/assembly/final.contigs.fa \
+        --threads ${MG_THREADS} \
+        --db $KRAKEN_DB \
+        --classified-out ${OUTPUT_DIR}/kraken/classified \
+        --report ${OUTPUT_DIR}/kraken/report \
+        --output ${OUTPUT_DIR}/kraken/kraken_output \
+        --memory-mapping \
+        --use-names
+    echo "[INFO] [$(date)] End of Fourth phase of pipeline: Taxonomy Analysis with Kraken2"
+fi
