@@ -214,7 +214,10 @@ else
         if [[ $OVERWRITE -eq 1 ]]; then
             rm -rf ${OUTPUT_DIR}/assembly
             # Run megahit on trimmed files
-            megahit -1 ${OUTPUT_DIR}/trimmed/${FQ_TRIMMED}_1.p.${FQ_FORMAT} -2 ${OUTPUT_DIR}/trimmed/${FQ_TRIMMED}_2.p.${FQ_FORMAT} --presets meta-large -o $OUTPUT_DIR/assembly -t ${MG_THREADS}
+            megahit \
+		    -1 ${OUTPUT_DIR}/trimmed/${FQ_TRIMMED}_1.p.${FQ_FORMAT}\  
+		    -2 ${OUTPUT_DIR}/trimmed/${FQ_TRIMMED}_2.p.${FQ_FORMAT}\ 
+		    --presets meta-large -o $OUTPUT_DIR/assembly -t ${MG_THREADS}
             echo "[INFO] [$(date)] End of third phase of pipeline: Trimmed Data Assembly"
         else
             echo "[ERROR] [$(date)] Assembly directory already exists. Use --overwrite to overwrite it."
